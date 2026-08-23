@@ -1,0 +1,6 @@
+cve_id,product_name,cvss_base_score,cisa_kev,first_epss,practitioner_rank_bank,practitioner_rank_startup
+CVE-2025-1111,Core Banking Framework,9.8,True,0.95,1,2
+CVE-2026-2222,Cloud Database Engine,7.5,False,0.91,4,1
+CVE-2024-3333,Embedded IoT Gateway,9.0,True,0.02,3,4
+CVE-2025-4444,Identity Provider SaaS,5.0,True,0.45,2,3
+CVE-2024-5555,Enterprise Router OS,6.8,False,0.0012,5,5
