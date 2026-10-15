@@ -1,6 +1,5 @@
-fastapi
-uvicorn[standard]
-pandas
-python-multipart
-pydantic
-requests
+8984787633:AAFwqn16nD-JQ8TfwHEUpVZaGESDG123AZE
+
+https://am1t-builds-rm3g.vercel.app/
+
+google-genai
