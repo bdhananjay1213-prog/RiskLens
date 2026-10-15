@@ -1,19 +1,7 @@
-import { useEffect, useState } from "react";
+import { useRef, useState, type DragEvent, type ChangeEvent } from "react";
 
 const API_URL = "http://localhost:8000";
-
-interface Organization {
-  org_id: string;
-  name: string;
-  sector: string;
-  risk_appetite: string;
-  weight_modifiers: {
-    cvss_weight: number;
-    cisa_kev_weight: number;
-    first_epss_weight: number;
-  };
-  critical_products: string[];
-}
+const MAX_FILE_SIZE = 10 * 1024 * 1024;
 
 interface Vulnerability {
   rank: number;
@@ -22,608 +10,501 @@ interface Vulnerability {
   score: number;
   priority: string;
   cvss: number;
-  kev: boolean;
-  epss: number;
+  kev: boolean | null;
+  epss: number | null;
   critical_product: boolean;
-
+  available_signals: string[];
   score_breakdown: {
-  cvss: number;
-  kev: number;
-  epss: number;
-};
+    cvss: number;
+    kev: number;
+    epss: number;
+  };
+  recommendation: {
+    action: string;
+    reason: string;
+    next_step: string;
+  };
 }
 
-interface TriageResponse {
-  organization: {
-    id: string;
-    name: string;
-    sector: string;
-    risk_appetite: string;
-  };
+interface UploadResponse {
+  filename: string;
+  records_received: number;
+  records_ranked: number;
   results: Vulnerability[];
 }
 
 function App() {
-  const [organizations, setOrganizations] = useState<Organization[]>([]);
-  const [selectedOrg, setSelectedOrg] = useState("ORG-001");
-  const [data, setData] = useState<TriageResponse | null>(null);
-  const [loading, setLoading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [analysis, setAnalysis] = useState<UploadResponse | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [dragActive, setDragActive] = useState(false);
   const [error, setError] = useState("");
+  const [successMessage, setSuccessMessage] = useState("");
 
-  // --------------------------------
-  // Load organisations
-  // --------------------------------
+  const results = analysis?.results ?? [];
+  const urgentCount = results.filter((item) => item.priority === "URGENT").length;
+  const highCount = results.filter((item) => item.priority === "HIGH").length;
+  const kevCount = results.filter((item) => item.kev === true).length;
+  const unknownKevCount = results.filter((item) => item.kev === null).length;
+  const topScore = results.length > 0 ? results[0].score : 0;
 
-  useEffect(() => {
-    fetch(`${API_URL}/api/organizations`)
-      .then((response) => {
-        if (!response.ok) {
-          throw new Error("Failed to load organisations");
-        }
+  const validateSelectedFile = (file: File): boolean => {
+    const extension = file.name.split(".").pop()?.toLowerCase();
 
-        return response.json();
-      })
-      .then((result) => {
-        setOrganizations(result.organizations || []);
-      })
-      .catch((err) => {
-        setError(err.message);
-      });
-  }, []);
+    if (!extension || !["csv", "json"].includes(extension)) {
+      setError("Unsupported file format. Please choose a CSV or JSON file.");
+      setSuccessMessage("");
+      return false;
+    }
 
-  // --------------------------------
-  // Run RiskLens analysis
-  // --------------------------------
+    if (file.size > MAX_FILE_SIZE) {
+      setError("The maximum supported file size is 10 MB.");
+      setSuccessMessage("");
+      return false;
+    }
 
-  const analyseRisk = async (orgId = selectedOrg) => {
-  setLoading(true);
-  setError("");
+    if (file.size === 0) {
+      setError("The selected file is empty.");
+      setSuccessMessage("");
+      return false;
+    }
 
-  try {
-    const response = await fetch(
-      `${API_URL}/api/triage?org_id=${encodeURIComponent(orgId)}`,
-      {
+    setSelectedFile(file);
+    setError("");
+    setSuccessMessage("");
+    return true;
+  };
+
+  const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file) validateSelectedFile(file);
+
+    // Let the user select the same file again after removing it.
+    event.target.value = "";
+  };
+
+  const handleDrop = (event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    setDragActive(false);
+
+    const file = event.dataTransfer.files?.[0];
+    if (file) validateSelectedFile(file);
+  };
+
+  const handleUpload = async () => {
+    if (!selectedFile) {
+      setError("Please select a CSV or JSON vulnerability report first.");
+      return;
+    }
+
+    setUploading(true);
+    setError("");
+    setSuccessMessage("");
+    setAnalysis(null);
+
+    const formData = new FormData();
+    formData.append("file", selectedFile);
+
+    try {
+      const response = await fetch(`${API_URL}/api/upload`, {
         method: "POST",
-        headers: {
-          Accept: "application/json",
-        },
-      }
-    );
-
-    if (!response.ok) {
-      throw new Error(
-        `Risk analysis failed: HTTP ${response.status}`
-      );
-    }
-
-    const result = await response.json();
-
-    console.log("🔥 RiskLens TRIAGE RESPONSE:", result);
-
-    // ---------------------------------------
-    // Backend currently returns:
-    //
-    // {
-    //   comparison: [
-    //     {
-    //       organization: {...},
-    //       results: [...]
-    //     },
-    //     ...
-    //   ]
-    // }
-    // ---------------------------------------
-
-    if (Array.isArray(result.comparison)) {
-
-      const selected = result.comparison.find(
-        (item: any) =>
-          item.organization?.id === orgId ||
-          item.organization?.org_id === orgId
-      );
-
-      if (!selected) {
-        throw new Error(
-          `Organisation ${orgId} was not found in comparison data`
-        );
-      }
-
-      setData({
-        organization: {
-          id:
-            selected.organization.id ||
-            selected.organization.org_id,
-
-          name: selected.organization.name,
-
-          sector:
-            selected.organization.sector ||
-            "Unknown",
-
-          risk_appetite:
-            selected.organization.risk_appetite ||
-            "Unknown",
-        },
-
-        results: Array.isArray(selected.results)
-          ? selected.results
-          : [],
+        body: formData,
       });
 
-    } else {
+      const payload = await response.json().catch(() => ({}));
 
-      // ---------------------------------------
-      // Normal triage response fallback
-      // ---------------------------------------
-
-      if (!result.organization) {
-        throw new Error(
-          "Backend response is missing organization data"
-        );
+      if (!response.ok) {
+        const detail = payload?.detail;
+        const message =
+          typeof detail === "string"
+            ? detail
+            : detail?.message || `Upload failed with HTTP ${response.status}.`;
+        throw new Error(message);
       }
 
-      setData({
-        organization: result.organization,
-        results: Array.isArray(result.results)
-          ? result.results
-          : [],
-      });
+      const result = payload as UploadResponse;
+
+      if (!Array.isArray(result.results)) {
+        throw new Error("The backend response did not contain a results array.");
+      }
+
+      setAnalysis(result);
+      setSuccessMessage(
+        `Analysis completed: ${result.records_ranked} of ${result.records_received} records were ranked.`
+      );
+    } catch (err) {
+      console.error("RiskLens upload error:", err);
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Unable to upload the report. Check that the RiskLens backend is running."
+      );
+    } finally {
+      setUploading(false);
     }
+  };
 
-  } catch (err) {
+  const removeSelectedFile = () => {
+    setSelectedFile(null);
+    setError("");
+    setSuccessMessage("");
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  };
 
-    console.error("❌ RiskLens error:", err);
-
-    setError(
-      err instanceof Error
-        ? err.message
-        : "Unable to connect to RiskLens backend"
-    );
-
-    setData(null);
-
-  } finally {
-    setLoading(false);
-  }
-};
-
-  // --------------------------------
-  // Automatically analyse first org
-  // --------------------------------
-
-  useEffect(() => {
-    analyseRisk("ORG-001");
-  }, []);
-
-  // --------------------------------
-  // Derived statistics
-  // --------------------------------
-
-  const results = data?.results || [];
-
-  const urgentCount = results.filter(
-    (item) => item.priority === "URGENT"
-  ).length;
-
-  const kevCount = results.filter(
-    (item) => item.kev
-  ).length;
-
-  const topScore = results.length > 0
-    ? results[0].score
-    : 0;
+  const priorityClass = (priority: string) => {
+    switch (priority.toUpperCase()) {
+      case "URGENT":
+        return "urgent";
+      case "HIGH":
+        return "high";
+      case "MEDIUM":
+        return "medium";
+      default:
+        return "low";
+    }
+  };
 
   return (
     <div className="app">
+      <style>{`
+        .upload-panel {
+          display: flex;
+          flex-direction: column;
+          align-items: stretch;
+          gap: 18px;
+          margin-bottom: 28px;
+        }
+        .upload-panel h2 { margin: 0 0 8px; font-size: 24px; }
+        .upload-description { margin: 0; color: #8992a2; font-size: 14px; line-height: 1.65; }
+        .upload-dropzone {
+          border: 2px dashed #34445e;
+          border-radius: 16px;
+          padding: 34px 20px;
+          text-align: center;
+          background: rgba(15, 21, 32, 0.65);
+          transition: border-color .2s ease, background .2s ease;
+        }
+        .upload-dropzone.drag-active {
+          border-color: #6ea8ff;
+          background: rgba(79, 125, 243, .12);
+        }
+        .upload-icon { font-size: 38px; margin-bottom: 10px; }
+        .upload-dropzone h3 { margin: 0 0 8px; font-size: 17px; }
+        .upload-dropzone p { color: #8b9ab2; font-size: 13px; margin: 0 0 14px; }
+        .upload-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; }
+        .upload-select-button { display: inline-block; cursor: pointer; }
+        .upload-hint { margin: 14px 0 0 !important; font-size: 11px !important; }
+        .selected-file {
+          display: flex; align-items: center; justify-content: space-between;
+          flex-wrap: wrap; gap: 12px; padding: 14px;
+          border: 1px solid #263247; border-radius: 10px; background: #111827;
+        }
+        .selected-file-name { overflow-wrap: anywhere; color: #dce2eb; font-size: 13px; }
+        .selected-file-size { color: #8b9ab2; font-size: 12px; }
+        .upload-submit-button:disabled { opacity: .55; cursor: not-allowed; }
+        .upload-progress { color: #6ea8ff; font-size: 13px; }
+        .upload-summary { padding: 16px; border: 1px solid #263247; border-radius: 12px; background: #111827; }
+        .upload-summary p { margin: 8px 0 0; color: #a7b2c5; font-size: 13px; overflow-wrap: anywhere; }
+        .success-box {
+          margin: 18px 0; padding: 14px 18px; border: 1px solid #24533f;
+          border-radius: 10px; background: #10241b; color: #79e0b0;
+        }
+        .empty-state { padding: 42px 24px; text-align: center; color: #7f8999; border: 1px solid #202631; border-radius: 15px; background: #0d1016; }
+        .empty-state strong { display: block; color: #dce2eb; margin-bottom: 8px; }
+        .empty-state p { margin: 0; font-size: 13px; line-height: 1.6; }
+        .severity.medium { background: #253044; color: #8fb6ff; }
+        .severity.low { background: #1d302b; color: #7edbb4; }
+        .signals .kev { color: #ff6975; border-color: #4b252a; }
+        .signal-unknown { border-color: #51462b !important; color: #d6bb78 !important; }
+        .recommendation-reason { margin-top: 12px; color: #a2acbc; font-size: 12px; line-height: 1.6; }
+        @media (max-width: 800px) {
+          .upload-panel { align-items: stretch; }
+          .upload-submit-button { width: 100%; }
+        }
+      `}</style>
 
-      {/* HEADER */}
       <header className="header">
-
         <div>
           <h1>🛡️ RiskLens</h1>
-
-          <p>
-            Personalised Vulnerability Intelligence
-          </p>
+          <p>File-Driven Vulnerability Intelligence</p>
         </div>
-
         <div className="status">
-          <span className="status-dot"></span>
-
-          {loading ? "Analysing..." : "System Online"}
+          <span
+            className="status-dot"
+            style={uploading ? { background: "#6ea8ff", boxShadow: "0 0 12px #6ea8ff" } : undefined}
+          />
+          {uploading ? "Analysing report..." : "Ready for upload"}
         </div>
-
       </header>
 
-
       <main className="container">
-
-        {/* HERO */}
-
         <section className="hero">
-
-          <div>
-
-            <p className="eyebrow">
-              SECURITY INTELLIGENCE
-            </p>
-
-            <h2>
-              Understand the risks
-              <br />
-              that matter to you.
-            </h2>
-
-            <p className="hero-text">
-              RiskLens analyses vulnerability data using your
-              organisation's security context and prioritises
-              the risks that deserve attention first.
-            </p>
-
-          </div>
-
+          <p className="eyebrow">SECURITY INTELLIGENCE</p>
+          <h2>
+            Understand the risks
+            <br />
+            that matter to you.
+          </h2>
+          <p className="hero-text">
+            Upload a vulnerability report and RiskLens will validate its records,
+            calculate risk scores, and prioritise findings using CVSS and the
+            available exploitation intelligence.
+          </p>
         </section>
 
-
-        {/* ORGANISATION SELECTOR */}
-
-        <section className="organisation-card">
-
+        <section className="organisation-card upload-panel">
           <div>
-
-            <label>
-              ORGANISATION
-            </label>
-
-            <select
-              value={selectedOrg}
-              onChange={(event) => {
-                const orgId = event.target.value;
-
-                setSelectedOrg(orgId);
-                analyseRisk(orgId);
-              }}
-              className="org-select"
-            >
-
-              {organizations.map((org) => (
-                <option
-                  key={org.org_id}
-                  value={org.org_id}
-                >
-                  {org.name}
-                </option>
-              ))}
-
-            </select>
-
-            <h3>
-              {data?.organization?.name || "Loading..."}
-            </h3>
-
-            <p>
-              {data?.organization?.sector || "Loading sector"}
-              {" · "}
-              {data?.organization?.risk_appetite || "Loading risk appetite"}
+            <p className="eyebrow">REPORT ANALYSIS</p>
+            <h2>Upload a vulnerability report</h2>
+            <p className="upload-description">
+              Choose a CSV or JSON file containing vulnerability records. The
+              current upload API expects <code>cve_id</code>, <code>product_name</code>,
+              and <code>cvss_base_score</code>. KEV and EPSS values are optional.
             </p>
-
           </div>
 
-          <button
-            className="analyse-button"
-            onClick={() => analyseRisk()}
-            disabled={loading}
+          <div
+            className={`upload-dropzone ${dragActive ? "drag-active" : ""}`}
+            onDragOver={(event) => {
+              event.preventDefault();
+              setDragActive(true);
+            }}
+            onDragLeave={(event) => {
+              event.preventDefault();
+              setDragActive(false);
+            }}
+            onDrop={handleDrop}
+            role="region"
+            aria-label="Vulnerability report drop zone"
           >
-            {loading ? "Analysing..." : "Analyse Risk →"}
-          </button>
+            <div className="upload-icon">📂</div>
+            <h3>Drag and drop your report here</h3>
+            <p>Or browse your computer to select a file.</p>
 
-        </section>
-
-
-        {/* ERROR */}
-
-        {error && (
-          <div className="error-box">
-            ⚠️ {error}
-          </div>
-        )}
-
-
-        {/* STATS */}
-
-        <section className="stats">
-
-          <div className="stat-card">
-
-            <span>
-              TOP RISKS
-            </span>
-
-            <strong>
-              {results.length}
-            </strong>
-
-            <p>
-              Prioritised vulnerabilities
-            </p>
-
+            <div className="upload-actions">
+              <button
+                type="button"
+                className="analyse-button upload-select-button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={uploading}
+              >
+                Choose File
+              </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".csv,.json, text/csv, application/json"
+                hidden
+                onChange={handleFileChange}
+              />
+            </div>
+            <p className="upload-hint">CSV or JSON · Maximum file size: 10 MB</p>
           </div>
 
-
-          <div className="stat-card">
-
-            <span>
-              URGENT
-            </span>
-
-            <strong>
-              {urgentCount}
-            </strong>
-
-            <p>
-              Require immediate attention
-            </p>
-
-          </div>
-
-
-          <div className="stat-card">
-
-            <span>
-              KEV DETECTED
-            </span>
-
-            <strong>
-              {kevCount}
-            </strong>
-
-            <p>
-              Known exploited vulnerabilities
-            </p>
-
-          </div>
-
-
-          <div className="stat-card highlight">
-
-            <span>
-              TOP RISK SCORE
-            </span>
-
-            <strong>
-              {topScore.toFixed(1)}
-            </strong>
-
-            <p>
-              Highest prioritised risk
-            </p>
-
-          </div>
-
-        </section>
-
-
-        {/* TOP 5 HEADER */}
-
-        <section className="section-header">
-
-          <div>
-
-            <p className="eyebrow">
-              PRIORITISED THREATS
-            </p>
-
-            <h2>
-              Top 5 Vulnerabilities
-            </h2>
-
-          </div>
-
-          <button className="secondary-button">
-            Compare Organisations
-          </button>
-
-        </section>
-
-
-        {/* RISK LIST */}
-
-        <section className="risk-list">
-
-          {loading && (
-            <div className="loading">
-              Analysing vulnerabilities...
+          {selectedFile && (
+            <div className="selected-file">
+              <div>
+                <div className="selected-file-name">📄 {selectedFile.name}</div>
+                <div className="selected-file-size">
+                  {(selectedFile.size / 1024).toFixed(1)} KB
+                </div>
+              </div>
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={removeSelectedFile}
+                disabled={uploading}
+              >
+                Remove
+              </button>
             </div>
           )}
 
+          <button
+            type="button"
+            className="analyse-button upload-submit-button"
+            onClick={handleUpload}
+            disabled={!selectedFile || uploading}
+          >
+            {uploading ? "Analysing Report..." : "Upload & Analyse →"}
+          </button>
 
-          {!loading && results.map((risk) => (
+          {uploading && (
+            <p className="upload-progress">
+              Sending the report to RiskLens and calculating vulnerability priorities...
+            </p>
+          )}
 
-            <div
-              className="risk-card"
-              key={risk.cve_id}
+          {successMessage && <div className="success-box">✓ {successMessage}</div>}
+          {error && <div className="error-box">⚠️ {error}</div>}
+
+          {analysis && (
+            <div className="upload-summary">
+              <strong>Latest analysis</strong>
+              <p>File: {analysis.filename}</p>
+              <p>Records received: {analysis.records_received}</p>
+              <p>Records ranked: {analysis.records_ranked}</p>
+            </div>
+          )}
+        </section>
+
+        <section className="stats">
+          <div className="stat-card">
+            <span>RECORDS RANKED</span>
+            <strong>{analysis ? recordsText(analysis.records_ranked) : "—"}</strong>
+            <p>Valid findings returned by the ranking engine</p>
+          </div>
+          <div className="stat-card">
+            <span>URGENT</span>
+            <strong>{analysis ? urgentCount : "—"}</strong>
+            <p>Findings with an urgent score</p>
+          </div>
+          <div className="stat-card">
+            <span>HIGH PRIORITY</span>
+            <strong>{analysis ? highCount : "—"}</strong>
+            <p>Findings requiring prioritised review</p>
+          </div>
+          <div className="stat-card highlight">
+            <span>TOP RISK SCORE</span>
+            <strong>{analysis ? topScore.toFixed(1) : "—"}</strong>
+            <p>Highest calculated score out of 100</p>
+          </div>
+        </section>
+
+        <section className="section-header">
+          <div>
+            <p className="eyebrow">PRIORITISED FINDINGS</p>
+            <h2>Vulnerability Results</h2>
+          </div>
+          {analysis && (
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={() => {
+                setAnalysis(null);
+                setSuccessMessage("");
+              }}
             >
+              Clear Results
+            </button>
+          )}
+        </section>
 
-              {/* RANK */}
+        {analysis && (
+          <p className="upload-description" style={{ marginBottom: 18 }}>
+            Showing {results.length} ranked record(s) from <strong>{analysis.filename}</strong>.
+            {unknownKevCount > 0 && ` KEV status is unknown for ${unknownKevCount} record(s).`}
+            {kevCount > 0 && ` ${kevCount} record(s) are marked KEV in the supplied data.`}
+          </p>
+        )}
 
-              <div className="rank">
-                #{risk.rank}
-              </div>
+        <section className="risk-list">
+          {uploading && <div className="loading">Analysing vulnerability records...</div>}
 
+          {!uploading && !analysis && (
+            <div className="empty-state">
+              <strong>Your analysis will appear here</strong>
+              <p>
+                Upload a vulnerability report to see ranked findings, score
+                breakdowns, and recommended next steps. No mock results are loaded.
+              </p>
+            </div>
+          )}
 
+          {!uploading && analysis && results.length === 0 && (
+            <div className="empty-state">
+              <strong>No records could be ranked</strong>
+              <p>
+                Check that your report contains valid CVE identifiers, product names,
+                and CVSS scores between 0 and 10.
+              </p>
+            </div>
+          )}
+
+          {!uploading && results.map((risk) => (
+            <article className="risk-card" key={`${risk.cve_id}-${risk.rank}`}>
+              <div className="rank">#{risk.rank}</div>
               <div className="risk-content">
-
-                {/* TITLE */}
-
                 <div className="risk-title">
-
                   <div>
-
-                    <span
-                      className={`severity ${
-                        risk.priority === "URGENT"
-                          ? "urgent"
-                          : "high"
-                      }`}
-                    >
+                    <span className={`severity ${priorityClass(risk.priority)}`}>
                       {risk.priority}
                     </span>
-
-                    <h3>
-                      {risk.cve_id}
-                    </h3>
-
-                    <p>
-                      {risk.product}
-                    </p>
-
+                    <h3>{risk.cve_id}</h3>
+                    <p>{risk.product}</p>
                   </div>
-
-
                   <div className="score">
-
-                    <strong>
-                      {risk.score.toFixed(1)}
-                    </strong>
-
-                    <span>
-                      /100
-                    </span>
-
+                    <strong>{risk.score.toFixed(1)}</strong>
+                    <span>/100</span>
                   </div>
-
                 </div>
 
-
-                {/* SIGNALS */}
-
                 <div className="signals">
-
+                  <span>CVSS {risk.cvss.toFixed(1)}</span>
+                  {risk.kev === true && <span className="kev">● KEV marked true</span>}
+                  {risk.kev === false && <span>KEV: Not marked in supplied data</span>}
+                  {risk.kev === null && <span className="signal-unknown">KEV: Unknown</span>}
                   <span>
-                    CVSS {risk.cvss.toFixed(1)}
+                    EPSS {risk.epss === null ? "Unavailable" : risk.epss.toFixed(4)}
                   </span>
-
-                  {risk.kev && (
-                    <span className="kev">
-                      ● KEV Confirmed
-                    </span>
-                  )}
-
-                  <span>
-                    EPSS {risk.epss.toFixed(4)}
-                  </span>
-
-                  {risk.critical_product && (
-                    <span>
-                      ✓ Critical Product
-                    </span>
-                  )}
-
                 </div>
 
                 <div className="breakdown">
-
-  <strong>Why this ranked here?</strong>
-
-  <div className="breakdown-row">
-    <span>CVSS</span>
-    <span>+{risk.score_breakdown.cvss.toFixed(2)}</span>
-  </div>
-
-  <div className="breakdown-row">
-    <span>KEV</span>
-    <span>+{risk.score_breakdown.kev.toFixed(2)}</span>
-  </div>
-
-  <div className="breakdown-row">
-    <span>EPSS</span>
-    <span>+{risk.score_breakdown.epss.toFixed(2)}</span>
-  </div>
-
-  <div className="breakdown-total">
-    <span>Total Priority Score</span>
-    <strong>{risk.score.toFixed(2)}</strong>
-  </div>
-
-</div>
-
-
-                {/* WHY */}
+                  <strong>Why this ranked here</strong>
+                  <div className="breakdown-row">
+                    <span>CVSS contribution</span>
+                    <span>+{risk.score_breakdown.cvss.toFixed(2)}</span>
+                  </div>
+                  <div className="breakdown-row">
+                    <span>KEV contribution</span>
+                    <span>+{risk.score_breakdown.kev.toFixed(2)}</span>
+                  </div>
+                  <div className="breakdown-row">
+                    <span>EPSS contribution</span>
+                    <span>+{risk.score_breakdown.epss.toFixed(2)}</span>
+                  </div>
+                  <div className="breakdown-total">
+                    <span>Total RiskLens score</span>
+                    <strong>{risk.score.toFixed(2)}</strong>
+                  </div>
+                  <p className="recommendation-reason">
+                    Available signals: {risk.available_signals?.length
+                      ? risk.available_signals.join(", ").toUpperCase()
+                      : "Not specified"}
+                  </p>
+                </div>
 
                 <div className="why">
-
-                  <strong>
-                    Why does this matter?
-                  </strong>
-
-                  <p>
-
-                    {risk.kev
-                      ? "This vulnerability has a confirmed exploitation signal and "
-                      : "This vulnerability has no confirmed exploitation signal, but "
-                    }
-
-                    it affects a critical product and has a technical severity of{" "}
-
-                    <strong>
-                      {risk.cvss.toFixed(1)}
-                    </strong>
-
-                    {" "}with an EPSS exploitation probability of{" "}
-
-                    <strong>
-                      {(risk.epss * 100).toFixed(1)}%
-                    </strong>.
-
-                  </p>
-
+                  <strong>Why does this matter?</strong>
+                  <p>{risk.recommendation?.reason ?? "Review the available vulnerability data and validate it against trusted intelligence sources."}</p>
                 </div>
-
-
-                {/* NEXT ACTION */}
 
                 <div className="action">
-
-                  <span>
-                    →
-                  </span>
-
+                  <span>→</span>
                   <div>
-
-                    <strong>
-                      Recommended next step
-                    </strong>
-
-                    <p>
-                      Review the affected product and
-                      applicable vendor security guidance.
-                    </p>
-
+                    <strong>{risk.recommendation?.action ?? "Review vulnerability"}</strong>
+                    <p>{risk.recommendation?.next_step ?? "Verify the affected product and version, then consult vendor security guidance."}</p>
                   </div>
-
                 </div>
-
               </div>
-
-            </div>
-
+            </article>
           ))}
-
-
-          {!loading && results.length === 0 && !error && (
-
-            <div className="loading">
-              No relevant vulnerabilities found.
-            </div>
-
-          )}
-
         </section>
 
+        <p className="upload-description" style={{ marginTop: 24, fontSize: 12 }}>
+          RiskLens scores are prioritisation aids, not proof that a product is vulnerable
+          or that an attack has occurred. Verify supplied data and external intelligence
+          before making remediation decisions.
+        </p>
       </main>
-
     </div>
   );
+}
+
+function recordsText(value: number): string {
+  return value.toLocaleString();
 }
 
 export default App;
