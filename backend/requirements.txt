@@ -1,5 +1,6 @@
-8984787633:AAFwqn16nD-JQ8TfwHEUpVZaGESDG123AZE
-
-https://am1t-builds-rm3g.vercel.app/
-
+fastapi
+uvicorn
+pandas
+pydantic
+python-multipart
 google-genai
