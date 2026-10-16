@@ -108,11 +108,13 @@ function App() {
     formData.append("file", selectedFile);
 
     try {
-      const response = await fetch(`${API_URL}/api/upload`, {
-        method: "POST",
-        body: formData,
-      });
+      const formData = new FormData();
+formData.append("file", selectedFile);
 
+const response = await fetch(`${API_URL}/api/upload`, {
+  method: "POST",
+  body: formData,
+});
       const payload = await response.json().catch(() => ({}));
 
       if (!response.ok) {
