@@ -1,6 +1,6 @@
 import { useRef, useState, type DragEvent, type ChangeEvent } from "react";
 
-const API_URL = "https://risklens-api-946g.onrender.com/";
+const API_URL = "https://risklens-api-946g.onrender.com";
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
 
 interface Vulnerability {
